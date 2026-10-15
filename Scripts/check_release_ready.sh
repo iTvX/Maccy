@@ -3,8 +3,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_PATH="$ROOT_DIR/Build/Maccy.app"
 codesign --verify --deep --strict "$APP_PATH"
-codesign -dv "$APP_PATH" 2>&1 | grep -q '^Authority=Developer ID Application:'
-if codesign -d --entitlements :- "$APP_PATH" 2>/dev/null | grep -q get-task-allow; then
+codesign -dvv "$APP_PATH" 2>&1 | grep '^Authority=Developer ID Application:' >/dev/null
+if codesign -d --entitlements :- "$APP_PATH" 2>/dev/null | grep get-task-allow >/dev/null; then
     echo "The release contains a debug entitlement." >&2
     exit 1
 fi
