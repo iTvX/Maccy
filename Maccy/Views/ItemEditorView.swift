@@ -178,8 +178,7 @@ struct ItemEditorView: View {
   }
 
   private var uniquePins: [String] {
-    Array(Set(availablePins + [item.item.pin, selectedPin].compactMap { $0 }))
-      .sorted()
+    HistoryItem.sortedPins(Set(availablePins + [item.item.pin, selectedPin].compactMap { $0 }))
   }
 
   private var hasChangesToApply: Bool {
@@ -210,7 +209,7 @@ struct ItemEditorView: View {
     if let index = historyItem.contents.firstIndex(where: {
       $0.type == stringType
     }) {
-      historyItem.contents[index].value = data
+      historyItem.contents[index].setValue(data)
     } else {
       historyItem.contents.append(
         HistoryItemContent(type: stringType, value: data)

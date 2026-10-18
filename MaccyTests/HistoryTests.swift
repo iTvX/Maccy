@@ -13,7 +13,9 @@ class HistoryTests: XCTestCase { // swiftlint:disable:this type_body_length
 
   override func setUp() {
     super.setUp()
-    history.clearAll()
+    MainActor.assumeIsolated {
+      History.shared.clearAll()
+    }
     Defaults[.size] = 10
     Defaults[.sortBy] = .firstCopiedAt
     Defaults[.pinOrder] = PinOrder()
@@ -238,6 +240,40 @@ class HistoryTests: XCTestCase { // swiftlint:disable:this type_body_length
     try assertStorageCounts(items: 0, contents: 0)
   }
 
+  func testRecognizedTextBecomesTitle() async {
+    let item = imageItem("Maccy")
+    history.add(item)
+
+    await item.titleRecognition?.value
+
+    XCTAssertEqual(item.title, "Maccy")
+  }
+
+  func testDeletingDuringTextRecognition() async throws {
+    let item = history.add(imageItem("Maccy"))
+    let recognition = item.item.titleRecognition
+    history.delete(item)
+
+    try await assertTextRecognitionKeepsDeleted(recognition)
+  }
+
+  func testClearingDuringTextRecognition() async throws {
+    let item = history.add(imageItem("Maccy"))
+    let recognition = item.item.titleRecognition
+    history.clear()
+
+    try await assertTextRecognitionKeepsDeleted(recognition)
+  }
+
+  func testClearingAllDuringTextRecognition() async throws {
+    let item = history.add(imageItem("Maccy"))
+    history.togglePin(item)
+    let recognition = item.item.titleRecognition
+    history.clearAll()
+
+    try await assertTextRecognitionKeepsDeleted(recognition)
+  }
+
   func testMaxSize() throws {
     var items: [HistoryItemDecorator] = []
     for index in 0...10 {
@@ -416,6 +452,137 @@ class HistoryTests: XCTestCase { // swiftlint:disable:this type_body_length
     try assertStorageCounts(items: 1, contents: 1)
   }
 
+  func testExternalizingContents() throws {
+    let stringType = NSPasteboard.PasteboardType.string.rawValue
+    let htmlType = NSPasteboard.PasteboardType.html.rawValue
+    let rtfType = NSPasteboard.PasteboardType.rtf.rawValue
+    try insertLegacyItem([
+      stringType: Data("legacy".utf8),
+      htmlType: Data("<b>legacy</b>".utf8),
+      rtfType: nil
+    ])
+    try insertLegacyItem([stringType: Data("orphan".utf8)], orphaned: true)
+    XCTAssertEqual(try legacyContentsCount(), 3)
+
+    XCTAssertEqual(try Storage.externalizeContents(in: Storage.shared.container, batchSize: 2), 3)
+    XCTAssertEqual(try legacyContentsCount(), 0)
+    XCTAssertEqual(try Storage.externalizeContents(in: Storage.shared.container, batchSize: 2), 0)
+
+    // Read back through a fresh context, like `History.load()` after launch.
+    let context = ModelContext(Storage.shared.container)
+    let item = try XCTUnwrap(context.fetch(FetchDescriptor<HistoryItem>()).first)
+    let contents = Dictionary(uniqueKeysWithValues: item.contents.map { ($0.type, $0) })
+    XCTAssertEqual(Set(contents.keys), [stringType, htmlType, rtfType])
+    XCTAssertEqual(contents[stringType]?.value, Data("legacy".utf8))
+    XCTAssertEqual(contents[stringType]?.digest, HistoryItemContent.digest(Data("legacy".utf8)))
+    XCTAssertEqual(contents[stringType]?.byteCount, 6)
+    XCTAssertEqual(contents[htmlType]?.value, Data("<b>legacy</b>".utf8))
+    XCTAssertEqual(contents[htmlType]?.digest, HistoryItemContent.digest(Data("<b>legacy</b>".utf8)))
+    XCTAssertNil(contents[rtfType]?.value)
+    XCTAssertNil(contents[rtfType]?.digest)
+    XCTAssertNil(contents[rtfType]?.byteCount)
+    let orphan = try XCTUnwrap(context.fetch(FetchDescriptor<HistoryItemContent>(
+      predicate: #Predicate { $0.item == nil }
+    )).first)
+    XCTAssertEqual(orphan.digest, HistoryItemContent.digest(Data("orphan".utf8)))
+    XCTAssertEqual(orphan.byteCount, 6)
+    XCTAssertTrue(item.supersedes(historyItem("legacy", persisted: false)))
+    try assertStorageCounts(items: 1, contents: 4, orphaned: 1)
+  }
+
+  // Migrating an SQLite store to external storage reads NULL values back as empty data.
+  func testExternalizingContentsKeepsMissingValuesNil() throws {
+    let stringType = NSPasteboard.PasteboardType.string.rawValue
+    let rtfType = NSPasteboard.PasteboardType.rtf.rawValue
+    try insertLegacyItem([
+      stringType: Data("legacy".utf8),
+      rtfType: Data()
+    ])
+    XCTAssertEqual(try legacyContentsCount(), 2)
+
+    XCTAssertEqual(try Storage.externalizeContents(in: Storage.shared.container), 2)
+    XCTAssertEqual(try Storage.externalizeContents(in: Storage.shared.container), 0)
+
+    let context = ModelContext(Storage.shared.container)
+    let item = try XCTUnwrap(context.fetch(FetchDescriptor<HistoryItem>()).first)
+    let contents = Dictionary(uniqueKeysWithValues: item.contents.map { ($0.type, $0) })
+    XCTAssertEqual(contents[stringType]?.value, Data("legacy".utf8))
+    XCTAssertNotNil(contents[rtfType])
+    XCTAssertNil(contents[rtfType]?.value)
+    XCTAssertNil(contents[rtfType]?.digest)
+    XCTAssertNil(contents[rtfType]?.byteCount)
+    try assertStorageCounts(items: 1, contents: 2)
+  }
+
+  func testExternalizingContentsIsRetriedAfterFailure() async throws {
+    let key = "test-externalize-history-item-contents"
+    Defaults[.migrations][key] = nil
+    defer { Defaults[.migrations][key] = nil }
+    for value in ["foo", "bar", "baz"] {
+      try insertLegacyItem([NSPasteboard.PasteboardType.string.rawValue: Data(value.utf8)])
+    }
+
+    let saves = Counter()
+    let failed = AppDelegate.ensureAsyncMigration(key: key) {
+      _ = try Storage.externalizeContents(in: Storage.shared.container, batchSize: 1) { context in
+        saves.count += 1
+        if saves.count == 2 {
+          throw CocoaError(.fileWriteUnknown)
+        }
+        try context.save()
+      }
+    }
+    await failed?.value
+
+    XCTAssertEqual(saves.count, 2)
+    XCTAssertNil(Defaults[.migrations][key])
+    // The batch saved before the failure is kept.
+    XCTAssertEqual(try legacyContentsCount(), 2)
+
+    let retried = AppDelegate.ensureAsyncMigration(key: key) {
+      _ = try await Storage.externalizeContentsInBackground(in: Storage.shared.container)
+    }
+    await retried?.value
+
+    XCTAssertEqual(Defaults[.migrations][key], true)
+    XCTAssertEqual(try legacyContentsCount(), 0)
+    XCTAssertNil(AppDelegate.ensureAsyncMigration(key: key) {
+      XCTFail("A completed migration must not run again")
+    })
+    try assertStorageCounts(items: 3, contents: 3)
+  }
+
+  private final class Counter {
+    var count = 0
+  }
+
+  // Stores an item the way older versions did: without digests, and through
+  // another context, as the main one doesn't load anything before migrating.
+  private func insertLegacyItem(_ values: [String: Data?], orphaned: Bool = false) throws {
+    let context = ModelContext(Storage.shared.container)
+    let contents = values.map { type, value in
+      let content = HistoryItemContent(type: type, value: value)
+      content.digest = nil
+      content.byteCount = nil
+      return content
+    }
+    if orphaned {
+      contents.forEach(context.insert)
+    } else {
+      let item = HistoryItem()
+      context.insert(item)
+      item.contents = contents
+      item.title = item.generateTitle()
+    }
+    try context.save()
+  }
+
+  private func legacyContentsCount() throws -> Int {
+    try ModelContext(Storage.shared.container).fetchCount(FetchDescriptor<HistoryItemContent>(
+      predicate: #Predicate { $0.digest == nil && $0.value != nil }
+    ))
+  }
+
   private func assertStorageCounts(
     items: Int,
     contents: Int,
@@ -446,6 +613,46 @@ class HistoryTests: XCTestCase { // swiftlint:disable:this type_body_length
       file: file,
       line: line
     )
+  }
+
+  // OCR finishes after the item was deleted. Writing its title would bring the
+  // item back into the context, and `load()` would return it again.
+  private func assertTextRecognitionKeepsDeleted(
+    _ recognition: Task<Void, Never>?,
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) async throws {
+    let recognition = try XCTUnwrap(recognition, file: file, line: line)
+    await recognition.value
+    XCTAssertFalse(Storage.shared.context.hasChanges, file: file, line: line)
+
+    try await history.load()
+
+    XCTAssertEqual(history.items.toArray(), [], file: file, line: line)
+    try assertStorageCounts(items: 0, contents: 0, file: file, line: line)
+  }
+
+  private func imageItem(_ text: String) -> HistoryItem {
+    let image = NSImage(size: NSSize(width: 400, height: 120), flipped: false) { rect in
+      NSColor.white.setFill()
+      rect.fill()
+      NSString(string: text).draw(
+        at: NSPoint(x: 40, y: 30),
+        withAttributes: [.font: NSFont.systemFont(ofSize: 48), .foregroundColor: NSColor.black]
+      )
+      return true
+    }
+    let item = HistoryItem()
+    Storage.shared.context.insert(item)
+    item.contents = [
+      HistoryItemContent(
+        type: NSPasteboard.PasteboardType.tiff.rawValue,
+        value: image.tiffRepresentation
+      )
+    ]
+    item.title = item.generateTitle()
+
+    return item
   }
 
   private func historyItem(_ value: String, persisted: Bool = true) -> HistoryItem {

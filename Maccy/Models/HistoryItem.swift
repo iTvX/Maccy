@@ -1,5 +1,6 @@
 import AppKit
 import Defaults
+import ImageIO
 import Sauce
 import SwiftData
 import Vision
@@ -13,9 +14,12 @@ class HistoryItem {
     // "v" reserved for paste
     // "w" reserved for close window
     // "z" reserved for undo/redo
+    // "," reserved for preferences
+    // "`" reserved for cycling through windows
     var keys = Set([
       "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l",
-      "m", "n", "o", "p", "r", "s", "t", "u", "x", "y"
+      "m", "n", "o", "p", "r", "s", "t", "u", "x", "y",
+      "[", "]", ";", "'", ".", "/", "-", "=", "\\"
     ])
 
     if let deleteKey = KeyChord.deleteKey,
@@ -33,6 +37,15 @@ class HistoryItem {
     }
 
     return keys
+  }
+
+  // Letters first, then symbols.
+  static func sortedPins(_ pins: some Sequence<String>) -> [String] {
+    pins.sorted { lhs, rhs in
+      let lhsIsLetter = lhs.first?.isLetter ?? false
+      let rhsIsLetter = rhs.first?.isLetter ?? false
+      return lhsIsLetter == rhsIsLetter ? lhs < rhs : lhsIsLetter
+    }
   }
 
   @MainActor
@@ -73,6 +86,8 @@ class HistoryItem {
   var contents: [HistoryItemContent] = []
 
   @Transient private var cachedDecodedImage: NSImage?
+  // OCR started by `generateTitle()` for images.
+  @Transient private(set) var titleRecognition: Task<Void, Never>?
 
   init(contents: [HistoryItemContent] = []) {
     self.firstCopiedAt = firstCopiedAt
@@ -86,20 +101,20 @@ class HistoryItem {
         !Self.transientTypes.contains(content.type)
       }
       .allSatisfy { content in
-        contents.contains(where: { $0.type == content.type && $0.value == content.value })
+        contents.contains(where: { $0.type == content.type && $0.hasSameValue(as: content) })
       }
   }
 
   @MainActor
   func generateTitle() -> String {
-    let pasteboardImageData = contentData(Self.imageTypes)
+    let pasteboardImageData = self.pasteboardImageData
     let universalClipboardImageURL = universalClipboardImage ? fileURLs.first : nil
     guard pasteboardImageData == nil && universalClipboardImageURL == nil else {
-      Task {
+      titleRecognition = Task {
         if let recognizedText = await Self.recognizeText(
           imageData: pasteboardImageData,
           fileURL: universalClipboardImageURL
-        ) {
+        ), isStored {
           self.title = recognizedText
         }
       }
@@ -162,9 +177,26 @@ class HistoryItem {
     return NSAttributedString(html: data, documentAttributes: nil)
   }
 
+  // Checks types only, so the image itself isn't loaded.
+  var hasImage: Bool {
+    imageContent != nil || universalClipboardImage
+  }
+
+  // Recorded with the content, so the image isn't loaded to tell its size.
+  var imageByteCount: Int? {
+    if let byteCount = imageContent?.byteCount {
+      return byteCount
+    }
+    if universalClipboardImage, let url = fileURLs.first {
+      return try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize
+    }
+
+    return nil
+  }
+
+  @MainActor
   var imageData: Data? {
-    var data: Data?
-    data = contentData(Self.imageTypes)
+    var data = pasteboardImageData
     if data == nil, universalClipboardImage, let url = fileURLs.first {
       data = try? Data(contentsOf: url)
     }
@@ -172,6 +204,48 @@ class HistoryItem {
     return data
   }
 
+  // Where to read the image from off the main thread, without loading it into this model.
+  enum ImageLocation: Sendable {
+    case data(Data)
+    case content(PersistentIdentifier)
+    case file(URL)
+
+    func source(in container: ModelContainer) -> CGImageSource? {
+      let options = [kCGImageSourceShouldCache: false] as CFDictionary
+      switch self {
+      case .data(let data):
+        return CGImageSourceCreateWithData(data as CFData, options)
+      case .content(let id):
+        return Storage.value(of: id, in: container).flatMap { CGImageSourceCreateWithData($0 as CFData, options) }
+      case .file(let url):
+        return CGImageSourceCreateWithURL(url as CFURL, options)
+      }
+    }
+
+    func thumbnail(in container: ModelContainer, fitting size: NSSize, scale: CGFloat) -> NSImage.Thumbnail? {
+      source(in: container).flatMap { NSImage.thumbnail(of: $0, fitting: size, scale: scale) }
+    }
+  }
+
+  @MainActor
+  var imageLocation: ImageLocation? {
+    if let content = imageContent {
+      // Unsaved values aren't in the store yet.
+      if content.modelContext != nil, !content.hasChanges {
+        return .content(content.persistentModelID)
+      } else if let value = content.value {
+        return .data(value)
+      }
+    }
+
+    if universalClipboardImage, let url = fileURLs.first {
+      return .file(url)
+    }
+
+    return nil
+  }
+
+  @MainActor
   var image: NSImage? {
     if let img = cachedDecodedImage {
       return img
@@ -223,6 +297,29 @@ class HistoryItem {
     universalClipboard && contentData([.html, .tiff, .png, .jpeg, .rtf, .string, .heic]) != nil
   }
 
+  private var imageContent: HistoryItemContent? {
+    contents.first { Self.imageTypes.contains(NSPasteboard.PasteboardType($0.type)) }
+  }
+
+  @MainActor
+  private var pasteboardImageData: Data? {
+    imageContent.flatMap(Storage.shared.detachedValue)
+  }
+
+  // OCR takes seconds, so the item may have been deleted by the time it finishes.
+  // Bulk deletes (clearing the history) leave the item registered in the context,
+  // and setting its title there would bring it back on the next fetch.
+  @MainActor
+  private var isStored: Bool {
+    guard let modelContext else {
+      return false
+    }
+
+    let id = persistentModelID
+    let descriptor = FetchDescriptor<HistoryItem>(predicate: #Predicate { $0.persistentModelID == id })
+    return (try? modelContext.fetchCount(descriptor)) == 1
+  }
+
   private func contentData(_ types: [NSPasteboard.PasteboardType]) -> Data? {
     let content = contents.first(where: { content in
       return types.contains(NSPasteboard.PasteboardType(content.type))
@@ -246,7 +343,8 @@ class HistoryItem {
 
     let requestHandler = VNImageRequestHandler(data: data)
     let request = VNRecognizeTextRequest()
-    request.recognitionLevel = .fast
+    request.recognitionLevel = .accurate
+    request.automaticallyDetectsLanguage = true
 
     do {
       try requestHandler.perform([request])

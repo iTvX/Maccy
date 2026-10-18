@@ -3,6 +3,7 @@ import Defaults
 import Foundation
 import Observation
 import Sauce
+import SwiftData
 
 @Observable
 class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
@@ -41,7 +42,7 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
     return url.deletingPathExtension().lastPathComponent
   }
 
-  var hasImage: Bool { item.image != nil }
+  var hasImage: Bool { item.hasImage }
   var hasFileURLs: Bool { !item.fileURLs.isEmpty }
   var hasPlainText: Bool { item.text != nil }
   var hasRichText: Bool { item.rtf != nil || item.html != nil }
@@ -51,7 +52,13 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
   var previewImage: NSImage?
   private(set) var previewText = SizedString("")
   var thumbnailImage: NSImage?
+  // Known once a thumbnail or preview is generated.
+  private(set) var imagePixelSize: NSSize?
   var applicationImage: ApplicationImage
+
+  var imageSize: String? {
+    item.imageByteCount.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) }
+  }
 
   // 10k characters seems to be more than enough on large displays
   var text: String { previewText.string.shortened(to: 10_000) }
@@ -78,8 +85,9 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
   // Describe the complete item independently of its potentially truncated visual content.
   var accessibilityLabel: String {
     var parts: [String] = []
-    if hasImage, let image = item.image {
-      let size = image.pixelSize
+    // Decoding the image here would keep it in memory for every rendered row,
+    // even while the popup is hidden.
+    if hasImage, let size = imagePixelSize {
       parts.append(
         String(
           format: NSLocalizedString("history_item_image_accessibility_label_no_app", comment: ""),
@@ -87,6 +95,8 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
           Int(size.height)
         )
       )
+    } else if hasImage {
+      parts.append(NSLocalizedString("history_item_image_accessibility_generic", comment: ""))
     } else {
       parts.append(title)
     }
@@ -121,33 +131,51 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
 
   @MainActor
   func ensureThumbnailImage() {
-    guard item.image != nil else {
-      return
-    }
     guard thumbnailImage == nil else {
       return
     }
     guard thumbnailImageGenerationTask == nil else {
       return
     }
+    guard let location = item.imageLocation else {
+      return
+    }
+    let container = Storage.shared.container
+    let size = HistoryItemDecorator.thumbnailImageSize
+    let scale = Self.backingScaleFactor
     thumbnailImageGenerationTask = Task { [weak self] in
-      self?.generateThumbnailImage()
+      let thumbnail = await Self.thumbnailDecoder.thumbnail(location, in: container, fitting: size, scale: scale)
+      guard let thumbnail else {
+        return
+      }
+      try Task.checkCancellation()
+      self?.imagePixelSize = thumbnail.originalPixelSize
+      self?.thumbnailImage = thumbnail.image
     }
   }
 
   @MainActor
   func ensurePreviewImage() {
-    guard item.image != nil else {
-      return
-    }
     guard previewImage == nil else {
       return
     }
     guard previewImageGenerationTask == nil else {
       return
     }
+    guard let location = item.imageLocation else {
+      return
+    }
+    let container = Storage.shared.container
+    let size = HistoryItemDecorator.previewImageSize
+    let scale = Self.backingScaleFactor
     previewImageGenerationTask = Task { [weak self] in
-      self?.generatePreviewImage()
+      // Not queued behind thumbnails, since only one preview is shown at a time.
+      guard let preview = await Self.decode(location, in: container, fitting: size, scale: scale) else {
+        return
+      }
+      try Task.checkCancellation()
+      self?.imagePixelSize = preview.originalPixelSize
+      self?.previewImage = preview.image
     }
   }
 
@@ -165,33 +193,46 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
   func cleanupImages() {
     thumbnailImageGenerationTask?.cancel()
     previewImageGenerationTask?.cancel()
-    thumbnailImage?.recache()
-    previewImage?.recache()
+    thumbnailImageGenerationTask = nil
+    previewImageGenerationTask = nil
     thumbnailImage = nil
     previewImage = nil
     item.clearDecodedImageCache()
   }
 
+  // Only the thumbnail is needed while the popup is closed.
   @MainActor
-  private func generateThumbnailImage() {
-    guard let image = item.image else {
-      return
-    }
-    thumbnailImage = image.resized(to: HistoryItemDecorator.thumbnailImageSize)
+  func releaseLargeImages() {
+    previewImageGenerationTask?.cancel()
+    previewImageGenerationTask = nil
+    previewImage = nil
+    item.clearDecodedImageCache()
   }
 
   @MainActor
-  private func generatePreviewImage() {
-    guard let image = item.image else {
-      return
-    }
-    previewImage = image.resized(to: HistoryItemDecorator.previewImageSize)
+  func sizeImages() async {
+    ensurePreviewImage()
+    ensureThumbnailImage()
+    _ = await previewImageGenerationTask?.result
+    _ = await thumbnailImageGenerationTask?.result
   }
 
+  // Images are read and decoded off the main thread, which only gets the small result.
+  private static let thumbnailDecoder = ThumbnailDecoder()
+
   @MainActor
-  func sizeImages() {
-    generatePreviewImage()
-    generateThumbnailImage()
+  private static var backingScaleFactor: CGFloat {
+    NSScreen.screens.map(\.backingScaleFactor).max() ?? 2
+  }
+
+  @concurrent
+  nonisolated private static func decode(
+    _ location: HistoryItem.ImageLocation,
+    in container: ModelContainer,
+    fitting size: NSSize,
+    scale: CGFloat
+  ) async -> NSImage.Thumbnail? {
+    location.thumbnail(in: container, fitting: size, scale: scale)
   }
 
   func highlight(_ query: String, _ ranges: [Range<String.Index>]) {
@@ -257,5 +298,19 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
         self?.synchronizeItemText()
       }
     }
+  }
+}
+
+// Decodes thumbnails one at a time. Every concurrent ImageIO decode leaves about 10 MB
+// in the allocator afterwards, so decoding a screen of screenshots in parallel would
+// add ~100 MB to the footprint.
+private actor ThumbnailDecoder {
+  func thumbnail(
+    _ location: HistoryItem.ImageLocation,
+    in container: ModelContainer,
+    fitting size: NSSize,
+    scale: CGFloat
+  ) -> NSImage.Thumbnail? {
+    location.thumbnail(in: container, fitting: size, scale: scale)
   }
 }
