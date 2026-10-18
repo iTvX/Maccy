@@ -117,6 +117,34 @@ class HistoryItemDecoratorTests: XCTestCase {
     XCTAssertNil(weakDecorator)
   }
 
+  func testResizedImageDoesNotRetainOriginal() {
+    weak var original: NSImage?
+    var resized: NSImage?
+    autoreleasepool {
+      let image = NSImage(size: NSSize(width: 400, height: 400))
+      image.addRepresentation(NSBitmapImageRep(
+        bitmapDataPlanes: nil, pixelsWide: 400, pixelsHigh: 400, bitsPerSample: 8, samplesPerPixel: 4,
+        hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+      )!)
+      original = image
+      resized = image.resized(to: NSSize(width: 100, height: 100))
+    }
+
+    XCTAssertEqual(resized?.size, NSSize(width: 100, height: 100))
+    XCTAssertNil(original)
+  }
+
+  func testReleasingLargeImagesKeepsThumbnail() {
+    let itemDecorator = historyItemDecorator(NSImage(named: "NSApplicationIcon")!)
+    itemDecorator.sizeImages()
+    XCTAssertNotNil(itemDecorator.previewImage)
+
+    itemDecorator.releaseLargeImages()
+
+    XCTAssertNil(itemDecorator.previewImage)
+    XCTAssertNotNil(itemDecorator.thumbnailImage)
+  }
+
   func testHighlight() {
     let itemDecorator = historyItemDecorator("foo bar baz")
     itemDecorator.highlight("random", [

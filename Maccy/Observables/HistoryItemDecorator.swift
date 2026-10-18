@@ -41,7 +41,7 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
     return url.deletingPathExtension().lastPathComponent
   }
 
-  var hasImage: Bool { item.image != nil }
+  var hasImage: Bool { item.hasImage }
   var hasFileURLs: Bool { !item.fileURLs.isEmpty }
   var hasPlainText: Bool { item.text != nil }
   var hasRichText: Bool { item.rtf != nil || item.html != nil }
@@ -51,11 +51,12 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
   var previewImage: NSImage?
   private(set) var previewText = SizedString("")
   var thumbnailImage: NSImage?
+  // Known once a thumbnail is generated.
+  private(set) var imagePixelSize: NSSize?
   var applicationImage: ApplicationImage
 
-  @ObservationIgnored
-  private(set) lazy var imageSize: String? = item.imageData.map {
-    ByteCountFormatter.string(fromByteCount: Int64($0.count), countStyle: .file)
+  var imageSize: String? {
+    item.imageByteCount.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) }
   }
 
   // 10k characters seems to be more than enough on large displays
@@ -83,8 +84,9 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
   // Describe the complete item independently of its potentially truncated visual content.
   var accessibilityLabel: String {
     var parts: [String] = []
-    if hasImage, let image = item.image {
-      let size = image.pixelSize
+    // Decoding the image here would keep it in memory for every rendered row,
+    // even while the popup is hidden.
+    if hasImage, let size = imagePixelSize {
       parts.append(
         String(
           format: NSLocalizedString("history_item_image_accessibility_label_no_app", comment: ""),
@@ -92,6 +94,8 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
           Int(size.height)
         )
       )
+    } else if hasImage {
+      parts.append(NSLocalizedString("history_item_image_accessibility_generic", comment: ""))
     } else {
       parts.append(title)
     }
@@ -177,12 +181,24 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
     item.clearDecodedImageCache()
   }
 
+  // Only the thumbnail is needed while the popup is closed.
+  @MainActor
+  func releaseLargeImages() {
+    previewImageGenerationTask?.cancel()
+    previewImageGenerationTask = nil
+    previewImage = nil
+    item.clearDecodedImageCache()
+  }
+
   @MainActor
   private func generateThumbnailImage() {
     guard let image = item.image else {
       return
     }
+    imagePixelSize = image.pixelSize
     thumbnailImage = image.resized(to: HistoryItemDecorator.thumbnailImageSize)
+    // Every listed row gets a thumbnail; keeping each full image too would hold them all in memory.
+    item.clearDecodedImageCache()
   }
 
   @MainActor

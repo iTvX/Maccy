@@ -5,6 +5,8 @@ import Defaults
 // swiftlint:disable force_try
 @MainActor
 class HistoryItemTests: XCTestCase {
+  private let blobType = NSPasteboard.PasteboardType("org.p0deje.Maccy.tests.blob")
+
   func testSortedPinsPlacesLettersBeforeSymbols() {
     XCTAssertEqual(
       HistoryItem.sortedPins(["/", "c", "[", "b", "-", "\\", "y"]),
@@ -138,6 +140,55 @@ class HistoryItemTests: XCTestCase {
   func testItemWithoutData() {
     let item = historyItem(nil)
     XCTAssertEqual(item.title, "")
+  }
+
+  func testSupersedingComparesDigests() {
+    let existing = historyItem(Data("foo".utf8), blobType)
+    // Matching digests are enough, so the stored value doesn't have to be loaded.
+    existing.contents[0].value = Data("not loaded".utf8)
+
+    XCTAssertEqual(existing.contents[0].digest, HistoryItemContent.digest(Data("foo".utf8)))
+    XCTAssertTrue(existing.supersedes(historyItem(Data("foo".utf8), blobType)))
+    XCTAssertFalse(existing.supersedes(historyItem(Data("bar".utf8), blobType)))
+  }
+
+  func testSupersedingContentsWithoutDigest() {
+    // Stored by an older version.
+    let legacy = historyItem(Data("foo".utf8), blobType)
+    legacy.contents[0].digest = nil
+
+    XCTAssertTrue(legacy.supersedes(historyItem(Data("foo".utf8), blobType)))
+    XCTAssertFalse(legacy.supersedes(historyItem(Data("bar".utf8), blobType)))
+    XCTAssertTrue(historyItem(Data("foo".utf8), blobType).supersedes(legacy))
+    XCTAssertFalse(historyItem(Data("bar".utf8), blobType).supersedes(legacy))
+  }
+
+  func testSettingValueUpdatesDigestAndByteCount() {
+    let content = historyItem(Data("foo".utf8), blobType).contents[0]
+    XCTAssertEqual(content.byteCount, 3)
+
+    content.setValue(Data("foobar".utf8))
+    XCTAssertEqual(content.digest, HistoryItemContent.digest(Data("foobar".utf8)))
+    XCTAssertEqual(content.byteCount, 6)
+
+    content.setValue(nil)
+    XCTAssertNil(content.digest)
+    XCTAssertNil(content.byteCount)
+  }
+
+  func testImageByteCountDoesNotLoadImage() {
+    let item = historyItem(Data(count: 2048), .png)
+    // The recorded size is used, so the stored value doesn't have to be loaded.
+    item.contents[0].value = Data("not loaded".utf8)
+
+    XCTAssertEqual(item.imageByteCount, 2048)
+    XCTAssertNil(historyItem("foo").imageByteCount)
+  }
+
+  func testSupersedingEmptyContents() {
+    XCTAssertTrue(historyItem(nil, blobType).supersedes(historyItem(nil, blobType)))
+    XCTAssertFalse(historyItem(nil, blobType).supersedes(historyItem(Data("foo".utf8), blobType)))
+    XCTAssertFalse(historyItem(Data("foo".utf8), blobType).supersedes(historyItem(nil, blobType)))
   }
 
   func testSeveralItemsCanHaveEmptyPin() {

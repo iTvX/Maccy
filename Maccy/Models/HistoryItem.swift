@@ -98,13 +98,13 @@ class HistoryItem {
         !Self.transientTypes.contains(content.type)
       }
       .allSatisfy { content in
-        contents.contains(where: { $0.type == content.type && $0.value == content.value })
+        contents.contains(where: { $0.type == content.type && $0.hasSameValue(as: content) })
       }
   }
 
   @MainActor
   func generateTitle() -> String {
-    let pasteboardImageData = contentData(Self.imageTypes)
+    let pasteboardImageData = self.pasteboardImageData
     let universalClipboardImageURL = universalClipboardImage ? fileURLs.first : nil
     guard pasteboardImageData == nil && universalClipboardImageURL == nil else {
       Task {
@@ -174,9 +174,26 @@ class HistoryItem {
     return NSAttributedString(html: data, documentAttributes: nil)
   }
 
+  // Checks types only, so the image itself isn't loaded.
+  var hasImage: Bool {
+    imageContent != nil || universalClipboardImage
+  }
+
+  // Recorded with the content, so the image isn't loaded to tell its size.
+  var imageByteCount: Int? {
+    if let byteCount = imageContent?.byteCount {
+      return byteCount
+    }
+    if universalClipboardImage, let url = fileURLs.first {
+      return try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize
+    }
+
+    return nil
+  }
+
+  @MainActor
   var imageData: Data? {
-    var data: Data?
-    data = contentData(Self.imageTypes)
+    var data = pasteboardImageData
     if data == nil, universalClipboardImage, let url = fileURLs.first {
       data = try? Data(contentsOf: url)
     }
@@ -184,6 +201,7 @@ class HistoryItem {
     return data
   }
 
+  @MainActor
   var image: NSImage? {
     if let img = cachedDecodedImage {
       return img
@@ -233,6 +251,15 @@ class HistoryItem {
   private var universalClipboardImage: Bool { universalClipboard && fileURLs.first?.pathExtension == "jpeg" }
   private var universalClipboardText: Bool {
     universalClipboard && contentData([.html, .tiff, .png, .jpeg, .rtf, .string, .heic]) != nil
+  }
+
+  private var imageContent: HistoryItemContent? {
+    contents.first { Self.imageTypes.contains(NSPasteboard.PasteboardType($0.type)) }
+  }
+
+  @MainActor
+  private var pasteboardImageData: Data? {
+    imageContent.flatMap(Storage.shared.detachedValue)
   }
 
   private func contentData(_ types: [NSPasteboard.PasteboardType]) -> Data? {

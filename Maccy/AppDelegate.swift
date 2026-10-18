@@ -1,10 +1,12 @@
 import Defaults
 import KeyboardShortcuts
+import Logging
 import Sparkle
 import SwiftUI
 
 class AppDelegate: NSObject, NSApplicationDelegate {
   nonisolated static let isTesting = CommandLine.arguments.contains("enable-testing")
+  private static let logger = Logger(label: "org.p0deje.Maccy")
   var panel: FloatingPanel<ContentView>!
 
   @objc
@@ -114,7 +116,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       contentRect: NSRect(origin: .zero, size: Defaults[.windowSize]),
       identifier: Bundle.main.bundleIdentifier ?? "org.p0deje.Maccy",
       statusBarButton: statusItem.button,
-      onClose: { AppState.shared.popup.reset() }
+      onClose: {
+        AppState.shared.popup.reset()
+        AppState.shared.history.releaseLargeImages()
+      }
     ) {
       ContentView()
     }
@@ -135,6 +140,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     if Defaults[.migrations][key] != true {
       action()
       Defaults[.migrations][key] = true
+    }
+  }
+
+  // Unlike `ensureMigration`, doesn't block the caller, and marks the migration
+  // as done only once it succeeds. A failed or interrupted run is retried on the
+  // next launch.
+  @discardableResult
+  static func ensureAsyncMigration(
+    key: String,
+    _ action: @escaping @MainActor () async throws -> Void
+  ) -> Task<Void, Never>? {
+    guard Defaults[.migrations][key] != true else {
+      return nil
+    }
+
+    return Task {
+      do {
+        try await action()
+        Defaults[.migrations][key] = true
+      } catch {
+        logger.error("Migration '\(key)' failed, retrying on next launch: \(String(reflecting: error))")
+      }
     }
   }
 
@@ -161,16 +188,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       Defaults[.enabledPasteboardTypes] = types
     }
 
-    ensureMigration(key: "2026-08-12-cleanup-orphaned-history-item-contents") {
-      _ = try? Storage.shared.cleanupOrphanedContents()
-    }
+    // Moving contents to external storage takes seconds for a large history, so
+    // it runs in the background. It re-inserts the contents, so nothing may load
+    // them into the main context before it's done: the other store migrations
+    // run after it, and `History.load()` waits for all of them.
+    Storage.shared.migrations = Task {
+      await Self.ensureAsyncMigration(key: "2026-10-17-externalize-history-item-contents") {
+        _ = try await Storage.externalizeContentsInBackground(in: Storage.shared.container)
+      }?.value
 
-    ensureMigration(key: "2026-08-31-sanitize-history-item-titles") {
-      _ = try? Storage.shared.sanitizeTitles()
-    }
+      ensureMigration(key: "2026-08-12-cleanup-orphaned-history-item-contents") {
+        _ = try? Storage.shared.cleanupOrphanedContents()
+      }
 
-    ensureMigration(key: "2026-09-15-remove-unpersistable-contents") {
-      _ = try? Storage.shared.removeUnpersistableContents()
+      ensureMigration(key: "2026-08-31-sanitize-history-item-titles") {
+        _ = try? Storage.shared.sanitizeTitles()
+      }
+
+      ensureMigration(key: "2026-09-15-remove-unpersistable-contents") {
+        _ = try? Storage.shared.removeUnpersistableContents()
+      }
     }
 
     // The following defaults are not used in Maccy 2.x

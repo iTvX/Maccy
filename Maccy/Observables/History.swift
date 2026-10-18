@@ -124,6 +124,8 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   func load() async throws {
+    await Storage.shared.migrations?.value
+
     let descriptor = FetchDescriptor<HistoryItem>()
     let results = try Storage.shared.context.fetch(descriptor)
     let decorators = sorter.sort(results).map { HistoryItemDecorator($0) }
@@ -343,6 +345,12 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   @MainActor
   private func cleanup(_ item: HistoryItemDecorator) {
     item.cleanupImages()
+  }
+
+  @MainActor
+  func releaseLargeImages() {
+    allPinnedItems.forEach { $0.releaseLargeImages() }
+    allUnpinnedItems.forEach { $0.releaseLargeImages() }
   }
 
   @MainActor
@@ -566,7 +574,8 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   private func updateTitlesForSpecialSymbols() {
-    for item in items where item.item.imageData == nil {
+    // Checks types only, so images aren't loaded.
+    for item in items where !item.item.hasImage {
       updateTitle(item: item, title: item.item.generateTitle())
     }
   }
