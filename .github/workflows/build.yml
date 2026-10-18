@@ -23,3 +23,6 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build-for-testing
       - name: Validate release scripts
         run: for script in Scripts/*.sh; do bash -n "$script"; done
+      - name: Remove built apps
+        if: always()
+        run: ./Scripts/remove_built_apps.sh .build/DerivedData/Build/Products
