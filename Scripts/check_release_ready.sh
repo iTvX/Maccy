@@ -17,7 +17,7 @@ spctl --assess --type execute "$APP_PATH"
     https://github.com/iTvX/Maccy/releases/download/appcast/appcast.xml ]]
 (cd "$ROOT_DIR/Build" && shasum -a 256 -c Maccy.zip.sha256)
 VERIFY_DIR="$(mktemp -d)"
-trap 'rm -rf "$VERIFY_DIR"' EXIT
+trap '"$ROOT_DIR/Scripts/remove_built_apps.sh" "$VERIFY_DIR" >/dev/null; rm -rf "$VERIFY_DIR"' EXIT
 ditto -x -k "$ROOT_DIR/Build/Maccy.zip" "$VERIFY_DIR"
 codesign --verify --deep --strict "$VERIFY_DIR/Maccy.app"
 xcrun stapler validate "$VERIFY_DIR/Maccy.app" >/dev/null

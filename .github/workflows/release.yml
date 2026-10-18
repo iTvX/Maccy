@@ -80,3 +80,6 @@ jobs:
             gh release create appcast Build/Appcast/appcast.xml \
               --title 'Maccy update feed' --notes 'Signed Sparkle update feed.' --prerelease
           fi
+      - name: Remove built apps
+        if: always()
+        run: ./Scripts/remove_built_apps.sh Build .release/DerivedData/Build/Products
