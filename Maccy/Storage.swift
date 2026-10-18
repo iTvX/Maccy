@@ -88,7 +88,10 @@ class Storage {
           guard let value = content.value else { continue }
 
           if let item = content.item {
-            let externalized = HistoryItemContent(type: content.type, value: value)
+            // Migrating the store to external storage turns NULL values into empty ones.
+            // Keep them nil, so an empty RTF or HTML isn't put on the pasteboard when
+            // the item is copied back, and so they don't match this fetch again.
+            let externalized = HistoryItemContent(type: content.type, value: value.isEmpty ? nil : value)
             context.insert(externalized)
             item.contents.append(externalized)
             context.delete(content)

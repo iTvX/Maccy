@@ -490,6 +490,30 @@ class HistoryTests: XCTestCase { // swiftlint:disable:this type_body_length
     try assertStorageCounts(items: 1, contents: 4, orphaned: 1)
   }
 
+  // Migrating an SQLite store to external storage reads NULL values back as empty data.
+  func testExternalizingContentsKeepsMissingValuesNil() throws {
+    let stringType = NSPasteboard.PasteboardType.string.rawValue
+    let rtfType = NSPasteboard.PasteboardType.rtf.rawValue
+    try insertLegacyItem([
+      stringType: Data("legacy".utf8),
+      rtfType: Data()
+    ])
+    XCTAssertEqual(try legacyContentsCount(), 2)
+
+    XCTAssertEqual(try Storage.externalizeContents(in: Storage.shared.container), 2)
+    XCTAssertEqual(try Storage.externalizeContents(in: Storage.shared.container), 0)
+
+    let context = ModelContext(Storage.shared.container)
+    let item = try XCTUnwrap(context.fetch(FetchDescriptor<HistoryItem>()).first)
+    let contents = Dictionary(uniqueKeysWithValues: item.contents.map { ($0.type, $0) })
+    XCTAssertEqual(contents[stringType]?.value, Data("legacy".utf8))
+    XCTAssertNotNil(contents[rtfType])
+    XCTAssertNil(contents[rtfType]?.value)
+    XCTAssertNil(contents[rtfType]?.digest)
+    XCTAssertNil(contents[rtfType]?.byteCount)
+    try assertStorageCounts(items: 1, contents: 2)
+  }
+
   func testExternalizingContentsIsRetriedAfterFailure() async throws {
     let key = "test-externalize-history-item-contents"
     Defaults[.migrations][key] = nil
