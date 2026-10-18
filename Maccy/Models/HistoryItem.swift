@@ -86,6 +86,8 @@ class HistoryItem {
   var contents: [HistoryItemContent] = []
 
   @Transient private var cachedDecodedImage: NSImage?
+  // OCR started by `generateTitle()` for images.
+  @Transient private(set) var titleRecognition: Task<Void, Never>?
 
   init(contents: [HistoryItemContent] = []) {
     self.firstCopiedAt = firstCopiedAt
@@ -108,11 +110,11 @@ class HistoryItem {
     let pasteboardImageData = self.pasteboardImageData
     let universalClipboardImageURL = universalClipboardImage ? fileURLs.first : nil
     guard pasteboardImageData == nil && universalClipboardImageURL == nil else {
-      Task {
+      titleRecognition = Task {
         if let recognizedText = await Self.recognizeText(
           imageData: pasteboardImageData,
           fileURL: universalClipboardImageURL
-        ) {
+        ), isStored {
           self.title = recognizedText
         }
       }
@@ -302,6 +304,20 @@ class HistoryItem {
   @MainActor
   private var pasteboardImageData: Data? {
     imageContent.flatMap(Storage.shared.detachedValue)
+  }
+
+  // OCR takes seconds, so the item may have been deleted by the time it finishes.
+  // Bulk deletes (clearing the history) leave the item registered in the context,
+  // and setting its title there would bring it back on the next fetch.
+  @MainActor
+  private var isStored: Bool {
+    guard let modelContext else {
+      return false
+    }
+
+    let id = persistentModelID
+    let descriptor = FetchDescriptor<HistoryItem>(predicate: #Predicate { $0.persistentModelID == id })
+    return (try? modelContext.fetchCount(descriptor)) == 1
   }
 
   private func contentData(_ types: [NSPasteboard.PasteboardType]) -> Data? {

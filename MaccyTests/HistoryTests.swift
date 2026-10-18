@@ -240,6 +240,40 @@ class HistoryTests: XCTestCase { // swiftlint:disable:this type_body_length
     try assertStorageCounts(items: 0, contents: 0)
   }
 
+  func testRecognizedTextBecomesTitle() async {
+    let item = imageItem("Maccy")
+    history.add(item)
+
+    await item.titleRecognition?.value
+
+    XCTAssertEqual(item.title, "Maccy")
+  }
+
+  func testDeletingDuringTextRecognition() async throws {
+    let item = history.add(imageItem("Maccy"))
+    let recognition = item.item.titleRecognition
+    history.delete(item)
+
+    try await assertTextRecognitionKeepsDeleted(recognition)
+  }
+
+  func testClearingDuringTextRecognition() async throws {
+    let item = history.add(imageItem("Maccy"))
+    let recognition = item.item.titleRecognition
+    history.clear()
+
+    try await assertTextRecognitionKeepsDeleted(recognition)
+  }
+
+  func testClearingAllDuringTextRecognition() async throws {
+    let item = history.add(imageItem("Maccy"))
+    history.togglePin(item)
+    let recognition = item.item.titleRecognition
+    history.clearAll()
+
+    try await assertTextRecognitionKeepsDeleted(recognition)
+  }
+
   func testMaxSize() throws {
     var items: [HistoryItemDecorator] = []
     for index in 0...10 {
@@ -555,6 +589,46 @@ class HistoryTests: XCTestCase { // swiftlint:disable:this type_body_length
       file: file,
       line: line
     )
+  }
+
+  // OCR finishes after the item was deleted. Writing its title would bring the
+  // item back into the context, and `load()` would return it again.
+  private func assertTextRecognitionKeepsDeleted(
+    _ recognition: Task<Void, Never>?,
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) async throws {
+    let recognition = try XCTUnwrap(recognition, file: file, line: line)
+    await recognition.value
+    XCTAssertFalse(Storage.shared.context.hasChanges, file: file, line: line)
+
+    try await history.load()
+
+    XCTAssertEqual(history.items.toArray(), [], file: file, line: line)
+    try assertStorageCounts(items: 0, contents: 0, file: file, line: line)
+  }
+
+  private func imageItem(_ text: String) -> HistoryItem {
+    let image = NSImage(size: NSSize(width: 400, height: 120), flipped: false) { rect in
+      NSColor.white.setFill()
+      rect.fill()
+      NSString(string: text).draw(
+        at: NSPoint(x: 40, y: 30),
+        withAttributes: [.font: NSFont.systemFont(ofSize: 48), .foregroundColor: NSColor.black]
+      )
+      return true
+    }
+    let item = HistoryItem()
+    Storage.shared.context.insert(item)
+    item.contents = [
+      HistoryItemContent(
+        type: NSPasteboard.PasteboardType.tiff.rawValue,
+        value: image.tiffRepresentation
+      )
+    ]
+    item.title = item.generateTitle()
+
+    return item
   }
 
   private func historyItem(_ value: String, persisted: Bool = true) -> HistoryItem {
