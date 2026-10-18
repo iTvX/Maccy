@@ -1,5 +1,6 @@
 import AppKit
 import Defaults
+import ImageIO
 import Sauce
 import SwiftData
 import Vision
@@ -199,6 +200,47 @@ class HistoryItem {
     }
 
     return data
+  }
+
+  // Where to read the image from off the main thread, without loading it into this model.
+  enum ImageLocation: Sendable {
+    case data(Data)
+    case content(PersistentIdentifier)
+    case file(URL)
+
+    func source(in container: ModelContainer) -> CGImageSource? {
+      let options = [kCGImageSourceShouldCache: false] as CFDictionary
+      switch self {
+      case .data(let data):
+        return CGImageSourceCreateWithData(data as CFData, options)
+      case .content(let id):
+        return Storage.value(of: id, in: container).flatMap { CGImageSourceCreateWithData($0 as CFData, options) }
+      case .file(let url):
+        return CGImageSourceCreateWithURL(url as CFURL, options)
+      }
+    }
+
+    func thumbnail(in container: ModelContainer, fitting size: NSSize, scale: CGFloat) -> NSImage.Thumbnail? {
+      source(in: container).flatMap { NSImage.thumbnail(of: $0, fitting: size, scale: scale) }
+    }
+  }
+
+  @MainActor
+  var imageLocation: ImageLocation? {
+    if let content = imageContent {
+      // Unsaved values aren't in the store yet.
+      if content.modelContext != nil, !content.hasChanges {
+        return .content(content.persistentModelID)
+      } else if let value = content.value {
+        return .data(value)
+      }
+    }
+
+    if universalClipboardImage, let url = fileURLs.first {
+      return .file(url)
+    }
+
+    return nil
   }
 
   @MainActor
