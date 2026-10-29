@@ -17,7 +17,7 @@ concurrency:
 jobs:
   release:
     if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
-    runs-on: [self-hosted, macOS, ARM64, maccy-local]
+    runs-on: [self-hosted, macOS, ARM64, maccy-release]
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
