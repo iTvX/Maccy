@@ -40,6 +40,24 @@ class HistoryTests: XCTestCase { // swiftlint:disable:this type_body_length
     XCTAssertEqual(history.items.toArray(), [second, first])
   }
 
+  func testAddingDoesNotInvalidateItemsWithoutShortcuts() {
+    Defaults[.size] = 20
+    let items = (0..<15).map { history.add(historyItem("item \($0)")) }
+    let oldest = items[0]
+    XCTAssertTrue(oldest.shortcuts.isEmpty)
+
+    let invalidated = expectation(description: "shortcuts are invalidated")
+    invalidated.isInverted = true
+    withObservationTracking {
+      _ = oldest.shortcuts
+    } onChange: {
+      invalidated.fulfill()
+    }
+    history.add(historyItem("new"))
+
+    wait(for: [invalidated], timeout: 0.1)
+  }
+
   func testAddingPersistedDuplicate() throws {
     let first = historyItem("foo")
     first.title = "xyz"
