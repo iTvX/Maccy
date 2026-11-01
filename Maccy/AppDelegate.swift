@@ -239,8 +239,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private func synchronizeMenuIconText() {
-    _ = withObservationTracking {
-      AppState.shared.menuIconText
+    withObservationTracking {
+      // Reading the text loads it, so unless it's shown only watch for a new item.
+      if Defaults[.showRecentCopyInMenuBar] {
+        _ = AppState.shared.menuIconText
+      } else {
+        _ = AppState.shared.history.firstUnpinnedItem
+      }
     } onChange: {
       DispatchQueue.main.async {
         if Defaults[.showRecentCopyInMenuBar] {

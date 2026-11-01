@@ -588,7 +588,8 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   private func updateUnpinnedShortcuts() {
     let shortcutItems = unpinnedItems.filter(\.isVisible)
-    for item in shortcutItems {
+    // Assigning notifies observers even if nothing changes, which would invalidate every rendered row.
+    for item in shortcutItems where !item.shortcuts.isEmpty {
       item.shortcuts = []
     }
 
