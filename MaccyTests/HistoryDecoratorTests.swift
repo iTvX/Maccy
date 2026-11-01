@@ -60,6 +60,27 @@ class HistoryItemDecoratorTests: XCTestCase {
     XCTAssertNil(itemDecorator.thumbnailImage)
   }
 
+  func testHasRichText() {
+    XCTAssertTrue(historyItemDecorator("<a href='#'>foo</a>".data(using: .utf8), .html).hasRichText)
+    XCTAssertFalse(historyItemDecorator("foo").hasRichText)
+  }
+
+  func testTextFollowsContentChanges() async {
+    let itemDecorator = historyItemDecorator("foo")
+    XCTAssertEqual(itemDecorator.text, "foo")
+
+    let observed = expectation(description: "text change is observed")
+    withObservationTracking {
+      _ = itemDecorator.previewText
+    } onChange: {
+      observed.fulfill()
+    }
+    itemDecorator.item.contents[0].setValue("bar".data(using: .utf8))
+
+    await fulfillment(of: [observed], timeout: 1)
+    XCTAssertEqual(itemDecorator.text, "bar")
+  }
+
   func testImage() async {
     let image = NSImage(named: "StatusBarMenuImage")!
     let itemDecorator = historyItemDecorator(image)

@@ -45,12 +45,19 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
   var hasImage: Bool { item.hasImage }
   var hasFileURLs: Bool { !item.fileURLs.isEmpty }
   var hasPlainText: Bool { item.text != nil }
-  var hasRichText: Bool { item.rtf != nil || item.html != nil }
+  // Checks the data only: parsing HTML goes out of process, through WebKit.
+  var hasRichText: Bool { item.rtfData != nil || item.htmlData != nil }
 
   var previewImageGenerationTask: Task<(), Error>?
   var thumbnailImageGenerationTask: Task<(), Error>?
   var previewImage: NSImage?
-  private(set) var previewText = SizedString("")
+  // Reading the text loads the content from disk and blocks on WebKit for HTML-only
+  // items, so it's done on demand rather than for the whole history on launch.
+  var previewText: SizedString {
+    access(keyPath: \.previewText)
+    return cachedPreviewText ?? loadPreviewText()
+  }
+  @ObservationIgnored private var cachedPreviewText: SizedString?
   var thumbnailImage: NSImage?
   // Known once a thumbnail or preview is generated.
   private(set) var imagePixelSize: NSSize?
@@ -126,7 +133,6 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
 
     synchronizeItemPin()
     synchronizeItemTitle()
-    synchronizeItemText()
   }
 
   @MainActor
@@ -290,14 +296,19 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
     }
   }
 
-  private func synchronizeItemText() {
-    previewText = withObservationTracking {
+  private func loadPreviewText() -> SizedString {
+    let text = withObservationTracking {
       SizedString(item.previewableText, maxParagraphBytes: Self.previewMaxParagraphSize)
     } onChange: { [weak self] in
       DispatchQueue.main.async { [weak self] in
-        self?.synchronizeItemText()
+        guard let self else { return }
+        self.withMutation(keyPath: \.previewText) {
+          self.cachedPreviewText = nil
+        }
       }
     }
+    cachedPreviewText = text
+    return text
   }
 }
 
